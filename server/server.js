@@ -2,6 +2,8 @@ const net = require("net");
 const auth = require("./auth");
 const fs = require("fs");
 const path = require("path");
+const dotenv = require("dotenv");
+dotenv.config();
 
 const loggedInUsers = new Set();
 const clients = new Set();
@@ -468,7 +470,8 @@ const server = net.createServer((socket) => {
   });
 });
 
-const PORT = 5000;
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+const host = process.env.HOST || "0.0.0.0";
+const port = process.env.PORT || 5000;
+server.listen(port, host, () => {
+  console.log(`Server listening on ${host}:${port}`);
 });

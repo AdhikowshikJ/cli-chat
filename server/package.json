@@ -1,0 +1,13 @@
+{
+  "name": "cli-chat-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "description": "CLI Chat App Server",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.5.0"
+  }
+}
