@@ -18,6 +18,39 @@ const HISTORY_LIMIT = 10;
 const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
+function deleteFilesSentByUser(username) {
+  // Check if uploads directory exists
+  if (!fs.existsSync(uploadsDir)) return;
+
+  const recipients = fs.readdirSync(uploadsDir);
+  recipients.forEach((recipient) => {
+    const recipientDir = path.join(uploadsDir, recipient);
+
+    // Skip non-directories
+    if (!fs.statSync(recipientDir).isDirectory()) return;
+
+    const files = fs.readdirSync(recipientDir);
+    files.forEach((file) => {
+      if (file.startsWith(`${username}__`)) {
+        const filePath = path.join(recipientDir, file);
+        try {
+          fs.unlinkSync(filePath);
+          console.log(`Deleted file: ${filePath}`);
+        } catch (err) {
+          console.error(`Failed to delete ${filePath}: ${err.message}`);
+        }
+      }
+    });
+
+    // Clean up empty recipient folders
+    if (fs.readdirSync(recipientDir).length === 0) {
+      fs.rmdirSync(recipientDir);
+    }
+  });
+}
+
+
+
 const server = net.createServer((socket) => {
   let currentUser = null;
   clients.add(socket);
@@ -31,49 +64,84 @@ const server = net.createServer((socket) => {
       return;
     }
     if (msg.type === "SEND_FILE") {
-  const { recipient, filename, data } = msg;
-  const targetSocket = userSockets[recipient];
-  if (targetSocket) {
-    targetSocket.write(JSON.stringify({
-      type: "RECEIVE_FILE",
-      sender: currentUser,
-      filename,
-      data
-    }) + "\n");
+      const { recipient, filename, data } = msg;
 
-    socket.write(JSON.stringify({
-      type: "ROOM",
-      message: `File '${filename}' sent to ${recipient}`
-    }) + "\n");
-  } else {
-    socket.write(JSON.stringify({
-      type: "ROOM",
-      message: `User '${recipient}' is not online.`
-    }) + "\n");
-  }
-  return;
-}
+      const recipientDir = path.join(uploadsDir, recipient);
+      if (!fs.existsSync(recipientDir)) fs.mkdirSync(recipientDir);
+
+      const filePath = path.join(recipientDir, `${currentUser}__${filename}`);
+      fs.writeFileSync(filePath, Buffer.from(data, "base64"));
+
+      const targetSocket = userSockets[recipient];
+      if (targetSocket) {
+        targetSocket.write(
+          JSON.stringify({
+            type: "FILE_NOTIFICATION",
+            sender: currentUser,
+            filename,
+          }) + "\n"
+        );
+      }
+
+      socket.write(
+        JSON.stringify({
+          type: "ROOM",
+          message: `File '${filename}' has been sent to ${recipient}.`,
+        }) + "\n"
+      );
+      return;
+    }
 
     if (msg.type === "AUTH") {
       const { username, password } = msg;
       if (msg.action === "register") {
         if (auth.registerUser(username, password)) {
-          socket.write(JSON.stringify({ type: "AUTH", status: "success", message: "Registration successful" }) + "\n");
+          socket.write(
+            JSON.stringify({
+              type: "AUTH",
+              status: "success",
+              message: "Registration successful",
+            }) + "\n"
+          );
         } else {
-          socket.write(JSON.stringify({ type: "AUTH", status: "fail", message: "Username already exists" }) + "\n");
+          socket.write(
+            JSON.stringify({
+              type: "AUTH",
+              status: "fail",
+              message: "Username already exists",
+            }) + "\n"
+          );
         }
       } else if (msg.action === "login") {
         if (loggedInUsers.has(username)) {
-          socket.write(JSON.stringify({ type: "AUTH", status: "fail", message: "User already logged in" }) + "\n");
+          socket.write(
+            JSON.stringify({
+              type: "AUTH",
+              status: "fail",
+              message: "User already logged in",
+            }) + "\n"
+          );
           return;
         }
         if (auth.validateUser(username, password)) {
           currentUser = username;
           loggedInUsers.add(username);
           userSockets[username] = socket;
-          socket.write(JSON.stringify({ type: "AUTH", status: "success", message: "Login successful" }) + "\n");
+          socket.write(
+            JSON.stringify({
+              type: "AUTH",
+              status: "success",
+              message: "Login successful",
+            }) + "\n"
+          );
         } else {
-          socket.write(JSON.stringify({ type: "AUTH", status: "fail", message: "Invalid username or password" }) + "\n");
+          socket.write(
+            JSON.stringify({
+              type: "AUTH",
+              status: "fail",
+              message: "Invalid username or password",
+            }) + "\n"
+          );
         }
       }
       return;
@@ -121,20 +189,61 @@ const server = net.createServer((socket) => {
 
       for (const user of rooms[room] || []) {
         if (userSockets[user]) {
-          userSockets[user].write(JSON.stringify({ type: "FILE_UPLOAD_ACK", filename: msg.filename }) + "\n");
+          userSockets[user].write(
+            JSON.stringify({
+              type: "FILE_UPLOAD_ACK",
+              filename: msg.filename,
+            }) + "\n"
+          );
         }
       }
       return;
     }
+    // Download acknowledgment and cleanup
+if (msg.type === "DOWNLOAD_ACK") {
+  const { sender, filename } = msg;
+  const filePath = path.join(uploadsDir, currentUser, `${sender}__${filename}`);
 
-    // Download file
+  // Delete the file if it exists
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+
+    const senderSocket = userSockets[sender];
+    if (senderSocket) {
+      senderSocket.write(JSON.stringify({
+        type: "ROOM",
+        message: `${currentUser} successfully downloaded '${filename}'. File deleted from server.`
+      }) + "\n");
+    }
+  }
+  return;
+}
+
+    // Download file  
     if (msg.type === "FILE_DOWNLOAD") {
-      const filePath = path.join(uploadsDir, msg.filename);
+      const { sender, filename } = msg;
+      const filePath = path.join(
+        uploadsDir,
+        currentUser,
+        `${sender}__${filename}`
+      );
+
       if (!fs.existsSync(filePath)) {
-        socket.write(JSON.stringify({ type: "FILE_DOWNLOAD_FAIL", message: "File not found" }) + "\n");
+        socket.write(
+          JSON.stringify({
+            type: "FILE_DOWNLOAD_FAIL",
+            message: `File '${filename}' from ${sender} not found.`,
+          }) + "\n"
+        );
       } else {
         const data = fs.readFileSync(filePath).toString("base64");
-        socket.write(JSON.stringify({ type: "FILE_DOWNLOAD", filename: msg.filename, data }) + "\n");
+        socket.write(
+          JSON.stringify({
+            type: "FILE_DOWNLOAD",
+            filename,
+            data,
+          }) + "\n"
+        );
       }
       return;
     }
@@ -145,12 +254,19 @@ const server = net.createServer((socket) => {
 
       if (command === "users" || command === "who") {
         const room = userRooms[currentUser];
-        socket.write(JSON.stringify({ type: command === "users" ? "USERS" : "WHO", users: rooms[room] || [] }) + "\n");
+        socket.write(
+          JSON.stringify({
+            type: command === "users" ? "USERS" : "WHO",
+            users: rooms[room] || [],
+          }) + "\n"
+        );
         return;
       }
 
       if (command === "rooms") {
-        socket.write(JSON.stringify({ type: "ROOMS", rooms: Object.keys(rooms) }) + "\n");
+        socket.write(
+          JSON.stringify({ type: "ROOMS", rooms: Object.keys(rooms) }) + "\n"
+        );
         return;
       }
 
@@ -173,31 +289,65 @@ const server = net.createServer((socket) => {
           roomAdmins[room] = currentUser;
           userRooms[currentUser] = room;
           roomHistory[room] = roomHistory[room] || [];
-          socket.write(JSON.stringify({ type: "ROOM", message: `Joined room '${room}' as admin` }) + "\n");
-          socket.write(JSON.stringify({ type: "ROOM_HISTORY", room, history: roomHistory[room] }) + "\n");
+          socket.write(
+            JSON.stringify({
+              type: "ROOM",
+              message: `Joined room '${room}' as admin`,
+            }) + "\n"
+          );
+          socket.write(
+            JSON.stringify({
+              type: "ROOM_HISTORY",
+              room,
+              history: roomHistory[room],
+            }) + "\n"
+          );
           return;
         }
 
         if (!roomJoinRequests[room]) roomJoinRequests[room] = [];
-        if (rooms[room].includes(currentUser) || roomJoinRequests[room].includes(currentUser)) {
-          socket.write(JSON.stringify({ type: "ROOM", message: `Already in or requested to join '${room}'` }) + "\n");
+        if (
+          rooms[room].includes(currentUser) ||
+          roomJoinRequests[room].includes(currentUser)
+        ) {
+          socket.write(
+            JSON.stringify({
+              type: "ROOM",
+              message: `Already in or requested to join '${room}'`,
+            }) + "\n"
+          );
           return;
         }
 
         roomJoinRequests[room].push(currentUser);
         const adminSocket = userSockets[roomAdmins[room]];
         if (adminSocket) {
-          adminSocket.write(JSON.stringify({ type: "ROOM_JOIN_REQUEST", room, username: currentUser }) + "\n");
+          adminSocket.write(
+            JSON.stringify({
+              type: "ROOM_JOIN_REQUEST",
+              room,
+              username: currentUser,
+            }) + "\n"
+          );
         }
 
-        socket.write(JSON.stringify({ type: "ROOM", message: `Join request sent to admin of '${room}'` }) + "\n");
+        socket.write(
+          JSON.stringify({
+            type: "ROOM",
+            message: `Join request sent to admin of '${room}'`,
+          }) + "\n"
+        );
         return;
       }
 
       if (command === "approve" || command === "reject") {
         const room = userRooms[currentUser];
         const [target] = msg.args || [];
-        if (roomAdmins[room] !== currentUser || !roomJoinRequests[room]?.includes(target)) return;
+        if (
+          roomAdmins[room] !== currentUser ||
+          !roomJoinRequests[room]?.includes(target)
+        )
+          return;
 
         if (command === "approve") {
           rooms[room].push(target);
@@ -205,23 +355,46 @@ const server = net.createServer((socket) => {
           roomHistory[room] = roomHistory[room] || [];
           const targetSocket = userSockets[target];
           if (targetSocket) {
-            targetSocket.write(JSON.stringify({ type: "ROOM", message: `You joined room '${room}'` }) + "\n");
-            targetSocket.write(JSON.stringify({ type: "ROOM_HISTORY", room, history: roomHistory[room] }) + "\n");
+            targetSocket.write(
+              JSON.stringify({
+                type: "ROOM",
+                message: `You joined room '${room}'`,
+              }) + "\n"
+            );
+            targetSocket.write(
+              JSON.stringify({
+                type: "ROOM_HISTORY",
+                room,
+                history: roomHistory[room],
+              }) + "\n"
+            );
           }
 
           for (const user of rooms[room]) {
             if (user !== target && userSockets[user]) {
-              userSockets[user].write(JSON.stringify({ type: "ROOM", message: `${target} joined the room.` }) + "\n");
+              userSockets[user].write(
+                JSON.stringify({
+                  type: "ROOM",
+                  message: `${target} joined the room.`,
+                }) + "\n"
+              );
             }
           }
         } else {
           const targetSocket = userSockets[target];
           if (targetSocket) {
-            targetSocket.write(JSON.stringify({ type: "ROOM", message: `Your request to join '${room}' was rejected.` }) + "\n");
+            targetSocket.write(
+              JSON.stringify({
+                type: "ROOM",
+                message: `Your request to join '${room}' was rejected.`,
+              }) + "\n"
+            );
           }
         }
 
-        roomJoinRequests[room] = roomJoinRequests[room].filter((u) => u !== target);
+        roomJoinRequests[room] = roomJoinRequests[room].filter(
+          (u) => u !== target
+        );
         return;
       }
 
@@ -230,11 +403,19 @@ const server = net.createServer((socket) => {
         if (!room) return;
         rooms[room] = rooms[room].filter((u) => u !== currentUser);
         delete userRooms[currentUser];
-        socket.write(JSON.stringify({ type: "ROOM", message: `You left room '${room}'` }) + "\n");
+        socket.write(
+          JSON.stringify({ type: "ROOM", message: `You left room '${room}'` }) +
+            "\n"
+        );
 
         for (const user of rooms[room]) {
           if (userSockets[user]) {
-            userSockets[user].write(JSON.stringify({ type: "ROOM", message: `${currentUser} left the room.` }) + "\n");
+            userSockets[user].write(
+              JSON.stringify({
+                type: "ROOM",
+                message: `${currentUser} left the room.`,
+              }) + "\n"
+            );
           }
         }
 
@@ -243,6 +424,8 @@ const server = net.createServer((socket) => {
           delete roomAdmins[room];
           delete roomJoinRequests[room];
         }
+        deleteFilesSentByUser(currentUser);
+
         return;
       }
     }
@@ -258,7 +441,13 @@ const server = net.createServer((socket) => {
 
       rooms[room].forEach((user) => {
         if (user !== currentUser && userSockets[user]) {
-          userSockets[user].write(JSON.stringify({ type: "MESSAGE", sender: currentUser, text: msg.text }) + "\n");
+          userSockets[user].write(
+            JSON.stringify({
+              type: "MESSAGE",
+              sender: currentUser,
+              text: msg.text,
+            }) + "\n"
+          );
         }
       });
       return;
@@ -267,12 +456,24 @@ const server = net.createServer((socket) => {
     if (msg.type === "PRIVATE_MESSAGE") {
       const { recipient, text } = msg;
       const targetSocket = userSockets[recipient];
-      const payload = { type: "PRIVATE_MESSAGE", sender: currentUser, recipient, text };
+      const payload = {
+        type: "PRIVATE_MESSAGE",
+        sender: currentUser,
+        recipient,
+        text,
+      };
       if (targetSocket) {
         targetSocket.write(JSON.stringify(payload) + "\n");
         socket.write(JSON.stringify(payload) + "\n");
       } else {
-        socket.write(JSON.stringify({ type: "PRIVATE_MESSAGE", sender: "Server", recipient: currentUser, text: `User '${recipient}' is not online.` }) + "\n");
+        socket.write(
+          JSON.stringify({
+            type: "PRIVATE_MESSAGE",
+            sender: "Server",
+            recipient: currentUser,
+            text: `User '${recipient}' is not online.`,
+          }) + "\n"
+        );
       }
       return;
     }
@@ -288,7 +489,12 @@ const server = net.createServer((socket) => {
         rooms[room] = rooms[room].filter((u) => u !== currentUser);
         for (const user of rooms[room] || []) {
           if (userSockets[user]) {
-            userSockets[user].write(JSON.stringify({ type: "ROOM", message: `${currentUser} left the room.` }) + "\n");
+            userSockets[user].write(
+              JSON.stringify({
+                type: "ROOM",
+                message: `${currentUser} left the room.`,
+              }) + "\n"
+            );
           }
         }
         if (rooms[room].length === 0) {
@@ -299,6 +505,8 @@ const server = net.createServer((socket) => {
       }
 
       delete userRooms[currentUser];
+      deleteFilesSentByUser(currentUser);
+
       currentUser = null;
     }
 
@@ -307,7 +515,10 @@ const server = net.createServer((socket) => {
   });
 
   socket.on("error", (err) => {
-    console.log(`Socket error from ${currentUser || "unknown user"}:`, err.message);
+    console.log(
+      `Socket error from ${currentUser || "unknown user"}:`,
+      err.message
+    );
   });
 });
 
